@@ -60,7 +60,9 @@ def _normalize_number(raw: str) -> Decimal:
         raise AmountError(f"Not a valid amount: {raw!r}") from e
 
 
-def parse_amount(value: str | int | float, default_currency: str) -> tuple[int, str]:
+def parse_amount(
+    value: str | int | float, default_currency: str, *, allow_zero: bool = False
+) -> tuple[int, str]:
     """Parse '12.50', '€12,50', '12,50 €', '$1,234.56', 'USD 10' or a number.
 
     Returns (cents, ISO currency code). Negative amounts (refunds) are kept negative.
@@ -91,7 +93,7 @@ def parse_amount(value: str | int | float, default_currency: str) -> tuple[int, 
             number = -abs(number)
         currency = currency or default_currency
     cents = int((number * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    if cents == 0:
+    if cents == 0 and not allow_zero:
         raise AmountError("Amount must not be zero")
     return cents, currency.upper()
 

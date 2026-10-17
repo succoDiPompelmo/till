@@ -85,33 +85,42 @@ Optional settings (`vars` in `wrangler.jsonc`, or secrets):
 | `/account <id> <name>` | Assign or change an expense's account |
 | `/addaccount <name>` | Add an account |
 | `/mapcard "Card or Pass" <account>` | Map an Apple Pay card label to an account |
+| `/openingbalance "BBVA" 1200 EUR` | Record BBVA's opening balance for EUR (once per account/currency) |
+| `/income "BBVA" 2000 EUR salary` | Record income or a top-up |
+| `/transfer "BBVA" "Cash" 100 EUR` | Move money between accounts; transfers are not expenses |
+| `/balance` | Show calculated account balances |
+| `/transfers [n]` | Show recent transfers |
 
 The initial accounts are **BBVA**, **Revolut**, **Company Welfare**, and **Edenred**. Add more with `/addaccount`. If a Telegram expense has no account, Till asks you to pick one. Existing expenses without an account appear under **Unassigned**; use `/account <id> <name>` to assign them.
 
-## iPhone: automatic logging of Apple Pay payments
+For balances, add any accounts you use (for example `/addaccount Cash`) and enter each account's real starting balance with `/openingbalance "Account name" amount [currency]`. This is a baseline as of the moment you run the command: older expenses already in Till are not subtracted again. Set one opening balance for each currency you want tracked. Then record incoming money with `/income`, expenses as usual, and movements between your own accounts with `/transfer`. A cash withdrawal is a transfer (for example BBVA → Cash), not an expense; log the cash purchases separately. `/balance` applies expenses and refunds after each account/currency's opening balance and includes income and transfers. Currencies are calculated independently; the balance may go below zero if the opening balance or a transaction is missing.
 
-Requires iOS 17+. In the **Shortcuts** app:
+## iPhone Shortcuts
 
-1. **Automation** tab → **+** → **Transaction** (Wallet).
-2. Choose the cards (and categories) to track, select **Run Immediately**, then **Next** → **New Blank Automation**.
-3. Add the action **Get Contents of URL**:
-   - URL: `https://till.<your-subdomain>.workers.dev/api/expenses`
-   - Method: **POST**
-   - Headers: `Authorization` = `Bearer <SHORTCUT_TOKEN>`
-   - Request Body: **JSON** with these fields (tap each value and pick the *Shortcut Input* variable, then the property):
-     | Key | Type | Value |
-     | --- | --- | --- |
-     | `amount` | Text | Shortcut Input → **Amount** |
-     | `merchant` | Text | Shortcut Input → **Merchant** |
-     | `card` | Text | Shortcut Input → **Card or Pass** |
-4. Done. Pay with Apple Pay → the expense is stored. If its card label has not been mapped, Till asks you to choose an account in Telegram and remembers that card-to-account mapping for next time. Uncategorized merchants also get the category picker.
+Create a personal automation or shortcut that sends an HTTP `POST` request to:
 
-> The Wallet trigger only fires for Apple Pay/Wallet payments. Anything else → Telegram.
+```text
+https://till.<your-subdomain>.workers.dev/api/expenses
+```
 
-The amount can be any format the Wallet produces (`€12,40`, `12,40 €`, `$1,234.56`). Other optional JSON fields:
-`currency` (ISO code), `category`, `account` (account name), `name` (description), `date` (ISO 8601, defaults to now). Normally leave `account` out and use the card mapping so each card is assigned once.
+Configure the request with:
 
-**Bonus — manual shortcut / Siri:** create a regular shortcut with *Ask for Input (Number)* → *Ask for Input (Text)* → the same *Get Contents of URL* using `amount` and `name`. Add it to the Home Screen or call it with "Hey Siri, log expense".
+- **Authorization header:** name the header `Authorization` and use the standard bearer-token format with your `SHORTCUT_TOKEN` secret as the credential.
+- **JSON body:** include an `amount` field, and optionally fields for `merchant` and `card`. Use the variables provided by your chosen Shortcut trigger where available.
+
+Example request body:
+
+```json
+{
+  "amount": "12,40 €",
+  "merchant": "Example Shop",
+  "card": "My Revolut Card"
+}
+```
+
+`amount` is required and can be a number or a currency-formatted string. Optional fields are `currency` (ISO code), `category`, `account` (account name), `name` (description), `note` (description alias), and `date` (ISO 8601; defaults to the time the Worker receives the request). For Wallet/card automations, send the card label when available; Till can ask you to map an unrecognized card to an account. Leave `account` out if you want that card mapping to determine the account.
+
+Available triggers, input variables, and the Shortcuts interface can differ between iOS versions and payment methods. Choose a trigger that provides the transaction details you need, and map its amount value to the JSON key `amount`. A manually run shortcut can use prompts for an amount and description instead. Test with a small expense and remove the test entry afterward.
 
 ## Export
 
@@ -134,7 +143,7 @@ uv run pywrangler dev                               # http://localhost:8787
 
 `.dev.vars` is a plain-text file for local development, not an encrypted vault. Keep it out of synced/shared folders if possible, use local/test credentials, and never commit it.
 
-Schema changes: `npx wrangler d1 migrations create till <name>`, then apply `--local` / `--remote`. For an existing deployment, apply the new migration before deploying code that depends on it:
+Schema changes: `npx wrangler d1 migrations create till <name>`, then apply `--local` / `--remote`. For an existing deployment, apply all new migrations before deploying code that depends on them:
 
 ```powershell
 npx wrangler d1 migrations apply till --remote

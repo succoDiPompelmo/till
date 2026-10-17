@@ -153,6 +153,117 @@ class Repository:
         )
         return rows[0]["account"] if rows else None
 
+    async def set_opening_balance(
+        self, account: str, amount_cents: int, currency: str, recorded_at: str
+    ) -> bool:
+        canonical = await self.resolve_account(account)
+        if canonical is None:
+            return False
+        existing = await self.db.all(
+            "SELECT id FROM account_funds WHERE account = ? COLLATE NOCASE"
+            " AND currency = ? AND kind = 'opening'",
+            (canonical, currency),
+        )
+        if existing:
+            return False
+        await self.db.run(
+            "INSERT INTO account_funds (account, amount_cents, currency, kind, created_at)"
+            " VALUES (?, ?, ?, 'opening', ?)",
+            (canonical, amount_cents, currency, recorded_at),
+        )
+        return True
+
+    async def add_income(
+        self,
+        account: str,
+        amount_cents: int,
+        currency: str,
+        recorded_at: str,
+        description: str | None = None,
+    ) -> bool:
+        canonical = await self.resolve_account(account)
+        if canonical is None or amount_cents <= 0:
+            return False
+        await self.db.run(
+            "INSERT INTO account_funds (account, amount_cents, currency, kind, description, created_at)"
+            " VALUES (?, ?, ?, 'income', ?, ?)",
+            (canonical, amount_cents, currency, description, recorded_at),
+        )
+        return True
+
+    async def add_transfer(
+        self,
+        from_account: str,
+        to_account: str,
+        amount_cents: int,
+        currency: str,
+        transferred_at: str,
+        description: str | None = None,
+    ) -> int | None:
+        source = await self.resolve_account(from_account)
+        destination = await self.resolve_account(to_account)
+        if (
+            source is None
+            or destination is None
+            or source.casefold() == destination.casefold()
+            or amount_cents <= 0
+        ):
+            return None
+        return await self.db.run(
+            "INSERT INTO transfers (from_account, to_account, amount_cents, currency, description, transferred_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (source, destination, amount_cents, currency, description, transferred_at),
+        )
+
+    async def balances(self, default_currency: str) -> list[dict[str, Any]]:
+        return await self.db.all(
+            "WITH opening AS ("
+            " SELECT account, currency, MIN(created_at) AS opened_at FROM account_funds"
+            " WHERE kind = 'opening' GROUP BY account COLLATE NOCASE, currency"
+            "), deltas AS ("
+            " SELECT f.account, f.currency, f.amount_cents AS change_cents FROM account_funds f"
+            " JOIN opening o ON f.account = o.account COLLATE NOCASE AND f.currency = o.currency"
+            " WHERE f.created_at >= o.opened_at"
+            " UNION ALL"
+            " SELECT e.account, e.currency, -e.amount_cents FROM expenses e"
+            " JOIN opening o ON e.account = o.account COLLATE NOCASE AND e.currency = o.currency"
+            " WHERE e.spent_at >= o.opened_at"
+            " UNION ALL"
+            " SELECT t.from_account, t.currency, -t.amount_cents FROM transfers t"
+            " JOIN opening o ON t.from_account = o.account COLLATE NOCASE AND t.currency = o.currency"
+            " WHERE t.transferred_at >= o.opened_at"
+            " UNION ALL"
+            " SELECT t.to_account, t.currency, t.amount_cents FROM transfers t"
+            " JOIN opening o ON t.to_account = o.account COLLATE NOCASE AND t.currency = o.currency"
+            " WHERE t.transferred_at >= o.opened_at"
+            ") SELECT account, currency, SUM(change_cents) AS balance_cents FROM deltas"
+            " GROUP BY account COLLATE NOCASE, currency ORDER BY account COLLATE NOCASE, currency"
+        )
+
+    async def missing_openings(self, default_currency: str) -> list[dict[str, str]]:
+        rows = await self.db.all(
+            "WITH active AS ("
+            " SELECT account, currency FROM expenses WHERE account IS NOT NULL"
+            " UNION SELECT account, currency FROM account_funds"
+            " UNION SELECT from_account, currency FROM transfers"
+            " UNION SELECT to_account, currency FROM transfers"
+            " UNION SELECT name, ? FROM accounts"
+            ") SELECT DISTINCT active.account, active.currency FROM active"
+            " WHERE NOT EXISTS ("
+            " SELECT 1 FROM account_funds f WHERE f.account = active.account COLLATE NOCASE"
+            " AND f.currency = active.currency AND f.kind = 'opening'"
+            ") ORDER BY active.account COLLATE NOCASE, active.currency",
+            (default_currency,),
+        )
+        return [{"account": r["account"], "currency": r["currency"]} for r in rows]
+
+    async def latest_transfers(self, limit: int = 10) -> list[dict[str, Any]]:
+        return await self.db.all(
+            "SELECT id, from_account, to_account, amount_cents, currency, description, transferred_at"
+            " FROM transfers ORDER BY transferred_at DESC, id DESC LIMIT ?",
+            (limit,),
+        )
+
     async def learn_rule(self, merchant: str, category: str) -> None:
         await self.db.run(
             "INSERT INTO merchant_rules (merchant, category) VALUES (?, ?)"

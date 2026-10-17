@@ -23,7 +23,7 @@ HELP = """<b>Till</b> — expense tracker
 Use <code>-</code> for refunds: <code>-15 refund #shopping</code>
 
 <b>Reports</b>
-/today · /week · /month · /year — totals by category
+/today · /week · /month · /year — totals by account and category
 /month 2026-09 — a specific month
 /accounts [period] — list accounts or report spending by account
 /last [n] — latest expenses with their ids
@@ -35,6 +35,11 @@ Use <code>-</code> for refunds: <code>-15 refund #shopping</code>
 /account &lt;id&gt; &lt;name&gt; — assign an account to an expense
 /addaccount &lt;name&gt; — add an account
 /mapcard "&lt;card&gt;" &lt;account&gt; — remember which account a card uses
+/openingbalance "&lt;account&gt;" &lt;amount&gt; [currency] — set its starting balance once
+/income "&lt;account&gt;" &lt;amount&gt; [currency] [note] — record money in
+/transfer "&lt;from&gt;" "&lt;to&gt;" &lt;amount&gt; [currency] — move money, not an expense
+/balance — current balance of each account
+/transfers [n] — recent transfers
 /categories — categories in use"""
 
 Call = dict[str, Any]  # {"method": "...", **params}
@@ -253,6 +258,155 @@ class Bot:
                     f"✅ Card <b>{html.escape(card)}</b> will use <b>{html.escape(account)}</b>.",
                 )
             ]
+        if command in ("/openingbalance", "/income", "/transfer"):
+            try:
+                parts = shlex.split(text)[1:]
+            except ValueError:
+                parts = []
+            if command == "/openingbalance":
+                if len(parts) not in (2, 3):
+                    return [
+                        _message(
+                            chat_id,
+                            'Usage: /openingbalance "&lt;account&gt;" &lt;amount&gt; [currency]',
+                        )
+                    ]
+                account, value = parts[0], parts[1]
+                currency_token = parts[2] if len(parts) == 3 else None
+                try:
+                    cents, currency = parse_amount(
+                        value, self.config.default_currency, allow_zero=True
+                    )
+                except AmountError as e:
+                    return [_message(chat_id, html.escape(str(e)))]
+                if currency_token and (code := as_currency_code(currency_token)):
+                    currency = code
+                elif currency_token:
+                    return [_message(chat_id, "Currency must be a 3-letter code, e.g. EUR.")]
+                account_name = await self.repo.resolve_account(account)
+                if account_name is None:
+                    return [_message(chat_id, "Unknown account. Use /accounts or /addaccount.")]
+                created = await self.repo.set_opening_balance(
+                    account_name, cents, currency, to_db(self.now)
+                )
+                if not created:
+                    return [
+                        _message(
+                            chat_id,
+                            f"An opening balance for {html.escape(account_name)} in {currency} "
+                            "already exists; it cannot be overwritten.",
+                        )
+                    ]
+                return [
+                    _message(
+                        chat_id,
+                        f"✅ Opening balance: <b>{format_money(cents, currency)}</b> "
+                        f"for <b>{html.escape(account_name)}</b>.",
+                    )
+                ]
+            if command == "/income":
+                if len(parts) < 2:
+                    return [
+                        _message(
+                            chat_id,
+                            'Usage: /income "&lt;account&gt;" &lt;amount&gt; [currency] [note]',
+                        )
+                    ]
+                account, value = parts[0], parts[1]
+                rest = parts[2:]
+                currency = self.config.default_currency
+                if rest and (code := as_currency_code(rest[0])):
+                    currency, rest = code, rest[1:]
+                try:
+                    cents, parsed_currency = parse_amount(value, currency)
+                except AmountError as e:
+                    return [_message(chat_id, html.escape(str(e)))]
+                if cents < 0:
+                    return [_message(chat_id, "Income amount must be positive.")]
+                currency = parsed_currency
+                account_name = await self.repo.resolve_account(account)
+                if account_name is None:
+                    return [_message(chat_id, "Unknown account. Use /accounts or /addaccount.")]
+                description = " ".join(rest) or None
+                await self.repo.add_income(
+                    account_name, cents, currency, to_db(self.now), description
+                )
+                note = f" · {html.escape(description)}" if description else ""
+                return [
+                    _message(
+                        chat_id,
+                        f"✅ Income recorded: <b>{format_money(cents, currency)}</b> "
+                        f"to <b>{html.escape(account_name)}</b>{note}.",
+                    )
+                ]
+            if len(parts) not in (3, 4):
+                return [
+                    _message(
+                        chat_id,
+                        'Usage: /transfer "&lt;from account&gt;" "&lt;to account&gt;" &lt;amount&gt; [currency]',
+                    )
+                ]
+            from_name, to_name, value = parts[:3]
+            currency_token = parts[3] if len(parts) == 4 else None
+            try:
+                cents, currency = parse_amount(value, self.config.default_currency)
+            except AmountError as e:
+                return [_message(chat_id, html.escape(str(e)))]
+            if cents < 0:
+                return [_message(chat_id, "Transfer amount must be positive.")]
+            if currency_token and (code := as_currency_code(currency_token)):
+                currency = code
+            elif currency_token:
+                return [_message(chat_id, "Currency must be a 3-letter code, e.g. EUR.")]
+            canonical_from = await self.repo.resolve_account(from_name)
+            canonical_to = await self.repo.resolve_account(to_name)
+            transfer_id = await self.repo.add_transfer(
+                from_name, to_name, cents, currency, to_db(self.now)
+            )
+            if transfer_id is None:
+                return [
+                    _message(
+                        chat_id,
+                        "Transfer failed: both accounts must exist and be different.",
+                    )
+                ]
+            return [
+                _message(
+                    chat_id,
+                    f"↔️ Transfer #{transfer_id}: <b>{format_money(cents, currency)}</b> "
+                    f"from <b>{html.escape(canonical_from or from_name)}</b> "
+                    f"to <b>{html.escape(canonical_to or to_name)}</b>. "
+                    "Not counted as spending.",
+                )
+            ]
+        if command == "/balance":
+            rows = await self.repo.balances(self.config.default_currency)
+            lines = ["<b>Account balances</b>"]
+            for row in rows:
+                lines.append(
+                    f"{html.escape(row['account'])}: "
+                    f"{format_money(row['balance_cents'], row['currency'])}"
+                )
+            missing = await self.repo.missing_openings(self.config.default_currency)
+            if missing:
+                lines.append(
+                    "\nOpening balance not set: "
+                    + ", ".join(
+                        f"{html.escape(row['account'])} ({html.escape(row['currency'])})"
+                        for row in missing
+                    )
+                )
+            return [_message(chat_id, "\n".join(lines))]
+        if command == "/transfers":
+            limit = int(args[0]) if args and args[0].isdigit() else 10
+            rows = await self.repo.latest_transfers(min(max(limit, 1), 50))
+            lines = [
+                f"#{row['id']} · {html.escape(row['transferred_at'])} · "
+                f"{html.escape(row['from_account'])} → {html.escape(row['to_account'])} · "
+                f"{format_money(row['amount_cents'], row['currency'])}"
+                for row in rows
+            ]
+            return [_message(chat_id, "\n".join(lines) if lines else "No transfers yet.")]
         return [_message(chat_id, "Unknown command. See /help.")]
 
     async def _handle_callback(self, cb: dict[str, Any]) -> list[Call]:

@@ -1,6 +1,6 @@
 import json
 
-from conftest import CHAT
+from conftest import CHAT, NOW
 
 TG = {"x-telegram-bot-api-secret-token": "hook-secret"}
 AUTH = {"Authorization": "Bearer shortcut-token"}
@@ -182,6 +182,68 @@ def test_account_text_syntax_and_account_report(run, app, repo):
     assert "Travel Card" in run(repo.accounts())
     assert "will use" in send(run, app, '/mapcard "My card" Travel Card')[0]["text"]
     assert run(repo.account_for_card("my card")) == "Travel Card"
+
+
+def test_transfers_income_opening_balances_and_refunds(run, app, repo):
+    from till.timeutil import to_db
+
+    # Historical expenses are already reflected in the opening balance and must not be deducted again.
+    run(
+        repo.add_expense(
+            amount_cents=9000,
+            currency="EUR",
+            account="BBVA",
+            spent_at="2026-10-17 13:00:00",
+            source="telegram",
+            description="before opening",
+            category="other",
+        )
+    )
+    assert "Opening balance" in send(run, app, '/openingbalance "BBVA" 1000 EUR')[0]["text"]
+    send(run, app, "/addaccount Cash")
+    assert "Opening balance" in send(run, app, '/openingbalance "Cash" 0 EUR')[0]["text"]
+    assert "already exists" in send(run, app, '/openingbalance "BBVA" 2000 EUR')[0]["text"]
+
+    run(
+        repo.add_expense(
+            amount_cents=1000,
+            currency="EUR",
+            account="BBVA",
+            spent_at=to_db(NOW),
+            source="telegram",
+            description="purchase",
+            category="other",
+        )
+    )
+    run(
+        repo.add_expense(
+            amount_cents=-500,
+            currency="EUR",
+            account="BBVA",
+            spent_at=to_db(NOW),
+            source="telegram",
+            description="refund",
+            category="other",
+        )
+    )
+    assert "Income recorded" in send(run, app, '/income "BBVA" 100 EUR salary')[0]["text"]
+    transfer = send(run, app, '/transfer "BBVA" "Cash" 25 EUR')[0]["text"]
+    assert "Not counted as spending" in transfer
+    assert "different" in send(run, app, '/transfer "BBVA" "BBVA" 10')[0]["text"]
+    assert "positive" in send(run, app, '/transfer "BBVA" "Cash" -1')[0]["text"]
+
+    balances = send(run, app, "/balance")[0]["text"]
+    assert "BBVA: €1,070.00" in balances
+    assert "Cash: €25.00" in balances
+    assert "Opening balance not set" in balances
+    [cash_transfer] = run(repo.latest_transfers())
+    assert (cash_transfer["from_account"], cash_transfer["to_account"], cash_transfer["amount_cents"]) == (
+        "BBVA",
+        "Cash",
+        2500,
+    )
+    assert len(run(repo.between("2026-10-17 00:00:00", "2026-10-18 00:00:00"))) == 3
+    assert "BBVA → Cash" in send(run, app, "/transfers")[0]["text"]
 
 
 def test_shortcut_validation(run, app):
