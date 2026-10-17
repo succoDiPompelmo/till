@@ -1,0 +1,4 @@
+TELEGRAM_BOT_TOKEN=123456:replace-me
+TELEGRAM_WEBHOOK_SECRET=local-webhook-secret
+ALLOWED_CHAT_IDS=111
+SHORTCUT_TOKEN=local-shortcut-token

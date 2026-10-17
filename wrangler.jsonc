@@ -1,0 +1,26 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "till",
+	"main": "src/entry.py",
+	"compatibility_date": "2026-10-01",
+	"compatibility_flags": ["python_workers"],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "till",
+			// Replace with the id printed by `npx wrangler d1 create till`
+			"database_id": "00000000-0000-0000-0000-000000000000",
+			"migrations_dir": "migrations"
+		}
+	],
+	"vars": {
+		"DEFAULT_CURRENCY": "EUR",
+		"TIMEZONE": "Europe/Rome"
+	},
+	// Secrets (set with `npx wrangler secret put <NAME>`, or .dev.vars locally):
+	//   TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, ALLOWED_CHAT_IDS, SHORTCUT_TOKEN
+	//   NOTIFY_CHAT_ID (optional: chat that gets a message for each Shortcut expense)
+	"observability": {
+		"enabled": true
+	}
+}
