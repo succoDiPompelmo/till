@@ -43,21 +43,22 @@ npx wrangler d1 create till
 # 2. Create the tables
 npx wrangler d1 migrations apply till --remote
 
-# 3. Secrets (generate random strings for the two secrets, e.g. `python -c "import secrets;print(secrets.token_urlsafe(32))"`)
+# 3. Deploy the Worker once so it exists on Cloudflare
+uv run pywrangler deploy
+
+# 4. Add secrets to the deployed Worker. Wrangler prompts for each value.
 npx wrangler secret put TELEGRAM_BOT_TOKEN       # from BotFather
 npx wrangler secret put TELEGRAM_WEBHOOK_SECRET  # random; Telegram sends it back on every webhook call
 npx wrangler secret put SHORTCUT_TOKEN           # random; used by the iPhone Shortcut
 npx wrangler secret put ALLOWED_CHAT_IDS         # your Telegram chat id(s), comma-separated (see below)
 
-# 4. Deploy
-uv run pywrangler deploy
-
-# 5. Point Telegram at the Worker (reads the token/secret from env vars or .dev.vars)
+# 5. Point Telegram at the Worker (script prompts for the bot token and webhook secret without echoing them)
 uv run scripts/set_webhook.py https://till.<your-subdomain>.workers.dev
 ```
 
-**Finding your chat id:** deploy with any value in `ALLOWED_CHAT_IDS`, send `/start` to your bot — it replies with your chat id.
-Update the secret and you're done.
+Keep the bot token and webhook secret somewhere secure, such as a password manager: Cloudflare stores them as Worker secrets, but does not show their values later. The webhook setup script prompts for them interactively and does not save them to a file.
+
+**Finding your chat id:** initially set `ALLOWED_CHAT_IDS` to a placeholder (for example `0`), then register the webhook and send `/start` to your bot. The bot replies with your chat id even though it is not yet authorized. Replace the placeholder by running `npx wrangler secret put ALLOWED_CHAT_IDS` again with your actual chat id(s), comma-separated.
 
 Optional settings (`vars` in `wrangler.jsonc`, or secrets):
 
@@ -119,9 +120,11 @@ curl -H "Authorization: Bearer <SHORTCUT_TOKEN>" "https://till.<your-subdomain>.
 uv sync
 uv run pytest                                       # unit tests (real SQL on sqlite3)
 
-Copy-Item .dev.vars.example .dev.vars               # local secrets
+Copy-Item .dev.vars.example .dev.vars               # local-only secrets (not needed to deploy)
 npx wrangler d1 migrations apply till --local
 uv run pywrangler dev                               # http://localhost:8787
 ```
+
+`.dev.vars` is a plain-text file for local development, not an encrypted vault. Keep it out of synced/shared folders if possible, use local/test credentials, and never commit it.
 
 Schema changes: `npx wrangler d1 migrations create till <name>`, then apply `--local` / `--remote`.

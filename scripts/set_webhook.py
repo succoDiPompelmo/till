@@ -3,14 +3,14 @@
 Usage:
     uv run scripts/set_webhook.py https://till.<your-subdomain>.workers.dev
 
-Reads TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET from the environment, or from .dev.vars.
+Prompts for TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET without echoing them
+or writing them to a file.
 """
 
+import getpass
 import json
-import os
 import sys
 import urllib.request
-from pathlib import Path
 
 COMMANDS = [
     ("today", "Today's totals by category"),
@@ -26,18 +26,6 @@ COMMANDS = [
 ]
 
 
-def load_settings() -> dict[str, str]:
-    values = {}
-    dev_vars = Path(__file__).parent.parent / ".dev.vars"
-    if dev_vars.exists():
-        for line in dev_vars.read_text(encoding="utf-8").splitlines():
-            if "=" in line and not line.lstrip().startswith("#"):
-                key, _, value = line.partition("=")
-                values[key.strip()] = value.strip().strip('"')
-    values.update({k: v for k, v in os.environ.items() if k.startswith("TELEGRAM_")})
-    return values
-
-
 def call(token: str, method: str, payload: dict) -> dict:
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{token}/{method}",
@@ -51,10 +39,10 @@ def call(token: str, method: str, payload: dict) -> dict:
 def main() -> None:
     if len(sys.argv) != 2 or not sys.argv[1].startswith("https://"):
         sys.exit(__doc__)
-    settings = load_settings()
-    token, secret = settings.get("TELEGRAM_BOT_TOKEN"), settings.get("TELEGRAM_WEBHOOK_SECRET")
+    token = getpass.getpass("Telegram bot token: ").strip()
+    secret = getpass.getpass("Telegram webhook secret: ").strip()
     if not token or not secret:
-        sys.exit("TELEGRAM_BOT_TOKEN and TELEGRAM_WEBHOOK_SECRET must be set")
+        sys.exit("Both Telegram credentials are required")
     url = sys.argv[1].rstrip("/") + "/telegram"
     print(call(token, "setWebhook", {
         "url": url,
