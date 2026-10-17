@@ -2,6 +2,7 @@
 
 import html
 import re
+import shlex
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -17,24 +18,30 @@ HELP = """<b>Till</b> — expense tracker
 
 <b>Log an expense</b>
 <code>12.50 lunch with Marco #food</code>
+<code>12.50 lunch #food @revolut</code>
 <code>8,90 taxi</code>  ·  <code>€30 gift #shopping</code>  ·  <code>20 USD souvenir</code>
 Use <code>-</code> for refunds: <code>-15 refund #shopping</code>
 
 <b>Reports</b>
 /today · /week · /month · /year — totals by category
 /month 2026-09 — a specific month
+/accounts [period] — list accounts or report spending by account
 /last [n] — latest expenses with their ids
 
 <b>Fix things</b>
 /undo — delete the last logged expense
 /del &lt;id&gt; — delete an expense
 /cat &lt;id&gt; &lt;category&gt; — recategorize (learns the merchant)
+/account &lt;id&gt; &lt;name&gt; — assign an account to an expense
+/addaccount &lt;name&gt; — add an account
+/mapcard "&lt;card&gt;" &lt;account&gt; — remember which account a card uses
 /categories — categories in use"""
 
 Call = dict[str, Any]  # {"method": "...", **params}
 
 _AMOUNT_TOKEN = re.compile(r"^[-+]?[^\d\s]{0,3}\d[\d.,']*[^\d\s]{0,3}$")
 _CATEGORY_RE = re.compile(r"^[\w-]{1,32}$")
+_ACCOUNT_RE = re.compile(r"^@([\w-]{1,32})$")
 
 
 @dataclass
@@ -43,6 +50,7 @@ class ParsedExpense:
     currency: str
     description: str | None
     category: str | None
+    account: str | None
 
 
 def parse_expense_text(text: str, default_currency: str) -> ParsedExpense | None:
@@ -63,13 +71,16 @@ def parse_expense_text(text: str, default_currency: str) -> ParsedExpense | None
     if rest and (code := as_currency_code(rest[0])):
         currency, rest = code, rest[1:]
     category = None
+    account = None
     words = []
     for word in rest:
         if word.startswith("#") and len(word) > 1:
             category = word[1:].lower()
+        elif match := _ACCOUNT_RE.fullmatch(word):
+            account = match.group(1).lower()
         else:
             words.append(word)
-    return ParsedExpense(cents, currency, " ".join(words) or None, category)
+    return ParsedExpense(cents, currency, " ".join(words) or None, category, account)
 
 
 def _message(chat_id: int, text: str, **extra: Any) -> Call:
@@ -82,11 +93,21 @@ def category_keyboard(expense_id: int, categories: list[str]) -> dict[str, Any]:
     return {"inline_keyboard": [buttons[i : i + 4] for i in range(0, len(buttons), 4)]}
 
 
+def account_keyboard(expense_id: int, accounts: list[tuple[int, str]]) -> dict[str, Any]:
+    buttons = [
+        {"text": name, "callback_data": f"account:{expense_id}:{account_id}"}
+        for account_id, name in accounts
+    ]
+    return {"inline_keyboard": [buttons[i : i + 2] for i in range(0, len(buttons), 2)]}
+
+
 def describe(expense: Expense, zone: Any) -> str:
     when = from_db(expense.spent_at, zone)
     parts = [f"<b>{format_money(expense.amount_cents, expense.currency)}</b>", html.escape(expense.label)]
     if expense.description and expense.merchant:
         parts.append(f"@ {html.escape(expense.merchant)}")
+    if expense.account:
+        parts.append(f"· {html.escape(expense.account)}")
     return f"#{expense.id} · {when:%d %b %H:%M} · " + " ".join(parts) + f" · <i>{html.escape(expense.category)}</i>"
 
 
@@ -97,6 +118,14 @@ async def expense_logged_calls(
     if expense.category == "uncategorized":
         keyboard = category_keyboard(expense.id, await repo.categories())
         return [_message(chat_id, text + "\nPick a category:", reply_markup=keyboard)]
+    if expense.account is None:
+        return [
+            _message(
+                chat_id,
+                text + "\nPick an account:",
+                reply_markup=account_keyboard(expense.id, await repo.account_options()),
+            )
+        ]
     return [_message(chat_id, text)]
 
 
@@ -128,12 +157,22 @@ class Bot:
         parsed = parse_expense_text(text, self.config.default_currency)
         if parsed is None:
             return [_message(chat_id, "🤔 I couldn't find an amount. Try <code>12.50 lunch #food</code> or /help.")]
+        if parsed.account and await self.repo.resolve_account(parsed.account) is None:
+            accounts = ", ".join(await self.repo.accounts())
+            return [
+                _message(
+                    chat_id,
+                    f"Unknown account <code>{html.escape(parsed.account)}</code>. "
+                    f"Available: {html.escape(accounts)}.",
+                )
+            ]
         spent = datetime.fromtimestamp(message["date"], UTC) if "date" in message else self.now
         expense = await self.repo.add_expense(
             amount_cents=parsed.amount_cents,
             currency=parsed.currency,
             description=parsed.description,
             category=parsed.category,
+            account=parsed.account,
             spent_at=to_db(spent),
             source="telegram",
         )
@@ -174,6 +213,46 @@ class Bot:
         if command == "/categories":
             cats = await self.repo.categories()
             return [_message(chat_id, ", ".join(cats) if cats else "No categories yet.")]
+        if command == "/accounts":
+            if not args:
+                return [_message(chat_id, "Accounts: " + ", ".join(await self.repo.accounts()))]
+            period = args[0]
+            return [_message(chat_id, await self.account_summary(period))]
+        if command == "/addaccount":
+            name = " ".join(args).strip()
+            if not name or len(name) > 40:
+                return [_message(chat_id, "Usage: /addaccount &lt;name&gt; (up to 40 characters)")]
+            account = await self.repo.add_account(name)
+            return [_message(chat_id, f"✅ Account added: <b>{html.escape(account)}</b>")]
+        if command == "/account":
+            if len(args) < 2 or not args[0].lstrip("#").isdigit():
+                return [_message(chat_id, "Usage: /account &lt;expense id&gt; &lt;account name&gt;")]
+            expense_id, name = int(args[0].lstrip("#")), " ".join(args[1:])
+            account = await self.repo.resolve_account(name)
+            if account is None:
+                return [_message(chat_id, "Unknown account. Use /accounts or /addaccount.")]
+            expense = await self.repo.set_account(expense_id, account)
+            if expense is None:
+                return [_message(chat_id, f"No expense #{expense_id}.")]
+            return [_message(chat_id, f"🏦 Updated\n{describe(expense, self.zone)}")]
+        if command == "/mapcard":
+            try:
+                parts = shlex.split(text)[1:]
+            except ValueError:
+                parts = []
+            if len(parts) < 2:
+                return [_message(chat_id, 'Usage: /mapcard "&lt;card name&gt;" &lt;account name&gt;')]
+            card, account_name = parts[0], " ".join(parts[1:])
+            account = await self.repo.resolve_account(account_name)
+            if account is None:
+                return [_message(chat_id, "Unknown account. Use /accounts or /addaccount.")]
+            await self.repo.learn_card_account(card, account)
+            return [
+                _message(
+                    chat_id,
+                    f"✅ Card <b>{html.escape(card)}</b> will use <b>{html.escape(account)}</b>.",
+                )
+            ]
         return [_message(chat_id, "Unknown command. See /help.")]
 
     async def _handle_callback(self, cb: dict[str, Any]) -> list[Call]:
@@ -184,21 +263,37 @@ class Bot:
             return [answer]
         data = cb.get("data", "")
         match = re.fullmatch(r"cat:(\d+):([\w-]{1,32})", data)
-        if not match:
+        account_match = re.fullmatch(r"account:(\d+):(\d+)", data)
+        if match:
+            expense = await self.repo.set_category(int(match.group(1)), match.group(2))
+        elif account_match:
+            account = await self.repo.account_by_id(int(account_match.group(2)))
+            expense = await self.repo.set_account(int(account_match.group(1)), account) if account else None
+        else:
             return [answer]
-        expense = await self.repo.set_category(int(match.group(1)), match.group(2))
         if expense is None:
-            return [{**answer, "text": "That expense no longer exists."}]
-        return [
-            {**answer, "text": f"Saved as {expense.category}"},
+            return [{**answer, "text": "That expense or account no longer exists."}]
+        is_account = account_match is not None
+        saved_value = expense.account if is_account else expense.category
+        calls = [
+            {**answer, "text": f"Saved as {saved_value}"},
             {
                 "method": "editMessageText",
                 "chat_id": chat_id,
                 "message_id": message["message_id"],
-                "text": f"🏷 Categorized\n{describe(expense, self.zone)}",
+                "text": f"{'🏦 Account set' if is_account else '🏷 Categorized'}\n{describe(expense, self.zone)}",
                 "parse_mode": "HTML",
             },
         ]
+        if match and expense.account is None:
+            calls.append(
+                _message(
+                    chat_id,
+                    f"🏦 Choose an account for expense #{expense.id}:",
+                    reply_markup=account_keyboard(expense.id, await self.repo.account_options()),
+                )
+            )
+        return calls
 
     async def summary(self, period: str) -> str:
         try:
@@ -210,12 +305,39 @@ class Bot:
             return f"<b>{label}</b>\nNo expenses."
         lines = [f"<b>{label}</b>"]
         totals: dict[str, int] = {}
+        account_totals: dict[tuple[str, str], int] = {}
+        last_account = None
         for row in rows:
+            account = row["account"] or "Unassigned"
+            if account != last_account:
+                lines.append(f"\n<b>{html.escape(account)}</b>")
+                last_account = account
             totals[row["currency"]] = totals.get(row["currency"], 0) + row["total"]
+            key = (account, row["currency"])
+            account_totals[key] = account_totals.get(key, 0) + row["total"]
             lines.append(
-                f"{html.escape(row['category'])}: {format_money(row['total'], row['currency'])}"
+                f"  {html.escape(row['category'])}: {format_money(row['total'], row['currency'])}"
                 f" <i>({row['n']})</i>"
             )
+        for (account, currency), amount in account_totals.items():
+            lines.append(f"<b>{html.escape(account)} total: {format_money(amount, currency)}</b>")
         lines.append("—")
         lines.extend(f"<b>Total: {format_money(t, c)}</b>" for c, t in totals.items())
+        return "\n".join(lines)
+
+    async def account_summary(self, period: str) -> str:
+        try:
+            start, end, label = period_bounds(period, self.now, self.zone)
+        except ValueError as e:
+            return html.escape(str(e))
+        rows = await self.repo.summary_by_account(to_db(start), to_db(end))
+        if not rows:
+            return f"<b>{label}</b>\nNo expenses."
+        lines = [f"<b>{label} · spending by account</b>"]
+        for row in rows:
+            account = row["account"] or "Unassigned"
+            lines.append(
+                f"{html.escape(account)}: {format_money(row['total'], row['currency'])} "
+                f"<i>({row['n']})</i>"
+            )
         return "\n".join(lines)

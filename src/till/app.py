@@ -97,6 +97,9 @@ class App:
             currency = code.upper()
         spent = parse_iso(str(payload["date"])) if payload.get("date") else None
         category = _clean(payload.get("category"), 32)
+        account = _clean(payload.get("account"), 40)
+        if account and await self.repo.resolve_account(account) is None:
+            return HttpResult(400, {"error": f"unknown account: {account}"})
         expense = await self.repo.add_expense(
             amount_cents=cents,
             currency=currency,
@@ -104,6 +107,7 @@ class App:
             description=_clean(payload.get("name") or payload.get("note")),
             card=_clean(payload.get("card")),
             category=category.lower() if category else None,
+            account=account,
             spent_at=to_db(spent or self.now),
             source="shortcut",
         )
@@ -119,15 +123,20 @@ class App:
             start, end, _ = period_bounds(query.get("period", "month"), self.now, self.zone)
         except ValueError as e:
             return HttpResult(400, {"error": str(e)})
-        expenses = await self.repo.between(to_db(start), to_db(end))
+        account = _clean(query.get("account"), 40)
+        if account and await self.repo.resolve_account(account) is None:
+            return HttpResult(400, {"error": f"unknown account: {account}"})
+        expenses = await self.repo.between(to_db(start), to_db(end), account)
         if query.get("format") == "csv":
             out = io.StringIO()
             writer = csv.writer(out)
-            writer.writerow(["id", "date", "amount", "currency", "category", "description", "merchant", "card", "source"])
+            writer.writerow(["id", "date", "amount", "currency", "category", "account", "description", "merchant", "card", "source"])
             for e in expenses:
+                absolute_cents = abs(e.amount_cents)
+                amount = f"{'-' if e.amount_cents < 0 else ''}{absolute_cents // 100}.{absolute_cents % 100:02d}"
                 writer.writerow([
-                    e.id, from_db(e.spent_at, self.zone).isoformat(), f"{e.amount_cents / 100:.2f}", e.currency,
-                    e.category, e.description or "", e.merchant or "", e.card or "", e.source,
+                    e.id, from_db(e.spent_at, self.zone).isoformat(), amount, e.currency,
+                    e.category, e.account or "", e.description or "", e.merchant or "", e.card or "", e.source,
                 ])
             return HttpResult(200, out.getvalue(), content_type="text/csv; charset=utf-8")
         return HttpResult(200, {"expenses": [e.to_dict() for e in expenses]})

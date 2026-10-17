@@ -53,9 +53,14 @@ def test_format_money():
 )
 def test_parse_expense_text(text, amount, currency, description, category):
     parsed = parse_expense_text(text, "EUR")
-    assert (parsed.amount_cents, parsed.currency, parsed.description, parsed.category) == (
-        amount, currency, description, category,
+    assert (parsed.amount_cents, parsed.currency, parsed.description, parsed.category, parsed.account) == (
+        amount, currency, description, category, None,
     )
+
+
+def test_parse_expense_with_account():
+    parsed = parse_expense_text("12.50 lunch #food @revolut", "EUR")
+    assert (parsed.description, parsed.category, parsed.account) == ("lunch", "food", "revolut")
 
 
 @pytest.mark.parametrize("text", ["hello there", "", "lunch"])

@@ -31,7 +31,8 @@ def test_telegram_ignores_unknown_chat_but_tells_id_on_start(run, app, repo):
 def test_log_expense_with_category(run, app, repo):
     calls = send(run, app, "12.50 lunch #food")
     assert calls[0]["method"] == "sendMessage"
-    assert "€12.50" in calls[0]["text"] and "reply_markup" not in calls[0]
+    assert "€12.50" in calls[0]["text"] and "reply_markup" in calls[0]
+    assert "Pick an account" in calls[0]["text"]
     [e] = run(repo.latest())
     assert (e.amount_cents, e.category, e.description, e.source) == (1250, "food", "lunch", "telegram")
 
@@ -50,7 +51,8 @@ def test_uncategorized_expense_gets_keyboard_and_callback_learns(run, app, repo)
     }
     result = run(app.handle("POST", "/telegram", {}, TG, json.dumps(update)))
     methods = [c["method"] for c in result.telegram_calls]
-    assert methods == ["answerCallbackQuery", "editMessageText"]
+    assert methods == ["answerCallbackQuery", "editMessageText", "sendMessage"]
+    assert "account for expense" in result.telegram_calls[-1]["text"]
     assert run(repo.latest())[0].category == "food"
     # learned: next "coffee" is auto-categorized
     send(run, app, "2.5 coffee")
@@ -103,7 +105,83 @@ def test_shortcut_wallet_transaction(run, app, repo):
     run(repo.set_category(exp["id"], "groceries"))
     result = run(app.handle("POST", "/api/expenses", {}, AUTH, json.dumps({"amount": 3, "merchant": "esselunga "})))
     assert result.body["expense"]["category"] == "groceries"
-    assert "reply_markup" not in result.telegram_calls[0]
+    assert "Pick an account" in result.telegram_calls[0]["text"]
+    assert "reply_markup" in result.telegram_calls[0]
+
+
+def test_telegram_account_selection_and_card_learning(run, app, repo):
+    calls = send(run, app, "12 lunch #food")
+    keyboard = calls[0]["reply_markup"]["inline_keyboard"]
+    callback_data = next(
+        b["callback_data"]
+        for row in keyboard
+        for b in row
+        if b["text"] == "BBVA"
+    )
+    expense = run(repo.latest())[0]
+    update = {
+        "callback_query": {
+            "id": "account-callback",
+            "data": callback_data,
+            "message": {"message_id": 20, "chat": {"id": CHAT}},
+        }
+    }
+    result = run(app.handle("POST", "/telegram", {}, TG, json.dumps(update)))
+    assert result.telegram_calls[0]["method"] == "answerCallbackQuery"
+    assert run(repo.get(expense.id)).account == "BBVA"
+
+    # Selecting a shortcut card's account teaches the mapping for future charges.
+    created = run(
+        app.handle(
+            "POST",
+            "/api/expenses",
+            {},
+            AUTH,
+            json.dumps(
+                {"amount": 3, "merchant": "Cafe", "card": "My Revolut Card", "category": "food"}
+            ),
+        )
+    )
+    account_prompt = created.telegram_calls[0]["reply_markup"]["inline_keyboard"]
+    rev_data = next(
+        b["callback_data"]
+        for row in account_prompt
+        for b in row
+        if b["text"] == "Revolut"
+    )
+    update["callback_query"].update(id="card-account", data=rev_data)
+    run(app.handle("POST", "/telegram", {}, TG, json.dumps(update)))
+    mapped = run(
+        app.handle(
+            "POST",
+            "/api/expenses",
+            {},
+            AUTH,
+            json.dumps({"amount": 2, "merchant": "Grocer", "card": "my revolut card"}),
+        )
+    )
+    assert mapped.body["expense"]["account"] == "Revolut"
+    assert "Pick an account" not in mapped.telegram_calls[0]["text"]
+
+
+def test_account_text_syntax_and_account_report(run, app, repo):
+    send(run, app, "10 lunch #food @bbva")
+    send(run, app, "5 lunch #food @revolut")
+    send(run, app, "3 lunch #food @welfare")
+    summary = send(run, app, "/accounts month")[0]["text"]
+    assert "BBVA: €10.00" in summary
+    assert "Revolut: €5.00" in summary
+    assert "Company Welfare: €3.00" in summary
+
+    monthly = send(run, app, "/month")[0]["text"]
+    assert "BBVA total: €10.00" in monthly
+    assert "Revolut total: €5.00" in monthly
+    assert "Company Welfare" in send(run, app, "/accounts")[0]["text"]
+
+    assert "Travel Card" in send(run, app, "/addaccount Travel Card")[0]["text"]
+    assert "Travel Card" in run(repo.accounts())
+    assert "will use" in send(run, app, '/mapcard "My card" Travel Card')[0]["text"]
+    assert run(repo.account_for_card("my card")) == "Travel Card"
 
 
 def test_shortcut_validation(run, app):
@@ -112,14 +190,41 @@ def test_shortcut_validation(run, app):
 
 
 def test_shortcut_explicit_date_and_list(run, app):
-    body = {"amount": "$4", "name": "Snack", "date": "2026-10-01T09:30:00+02:00", "category": "Food"}
+    body = {
+        "amount": "$4",
+        "name": "Snack",
+        "date": "2026-10-01T09:30:00+02:00",
+        "category": "Food",
+        "account": "Edenred",
+    }
     assert run(app.handle("POST", "/api/expenses", {}, AUTH, json.dumps(body))).status == 201
     listed = run(app.handle("GET", "/api/expenses", {"period": "2026-10"}, AUTH, ""))
     [e] = listed.body["expenses"]
-    assert (e["spent_at"], e["currency"], e["category"]) == ("2026-10-01 07:30:00", "USD", "food")
+    assert (e["spent_at"], e["currency"], e["category"], e["account"]) == (
+        "2026-10-01 07:30:00",
+        "USD",
+        "food",
+        "Edenred",
+    )
     csv_result = run(app.handle("GET", "/api/expenses", {"period": "2026-10", "format": "csv"}, AUTH, ""))
     assert csv_result.content_type.startswith("text/csv")
-    assert "2026-10-01T09:30:00+02:00,4.00,USD,food,Snack" in csv_result.body
+    assert "2026-10-01T09:30:00+02:00,4.00,USD,food,Edenred,Snack" in csv_result.body
+
+
+def test_account_filter_and_invalid_account(run, app):
+    run(
+        app.handle(
+            "POST",
+            "/api/expenses",
+            {},
+            AUTH,
+            json.dumps({"amount": "5", "account": "BBVA"}),
+        )
+    )
+    result = run(app.handle("GET", "/api/expenses", {"period": "month", "account": "Edenred"}, AUTH, ""))
+    assert result.body["expenses"] == []
+    invalid = run(app.handle("GET", "/api/expenses", {"account": "Unknown"}, AUTH, ""))
+    assert invalid.status == 400
 
 
 def test_not_found_and_health(run, app):

@@ -76,10 +76,17 @@ Optional settings (`vars` in `wrangler.jsonc`, or secrets):
 | `8,90 taxi` / `taxi 8,90` | Amount can come first or last; comma or dot decimals |
 | `20 USD souvenir`, `£3 coffee` | Other currencies (totals are kept per currency) |
 | `-15 refund #shopping` | Refunds are negative amounts |
-| `/today` `/week` `/month` `/year` `/month 2026-09` | Totals by category |
+| `12.50 lunch #food @revolut` | Assigns the expense to an account; omit `@...` to choose from Telegram buttons |
+| `/today` `/week` `/month` `/year` `/month 2026-09` | Totals by account and category (currencies remain separate) |
+| `/accounts` / `/accounts month` | List accounts / spending by account for a period |
 | `/last [n]` | Latest expenses with their ids |
 | `/undo`, `/del <id>` | Delete |
 | `/cat <id> <category>` | Recategorize (and remember the merchant/description) |
+| `/account <id> <name>` | Assign or change an expense's account |
+| `/addaccount <name>` | Add an account |
+| `/mapcard "Card or Pass" <account>` | Map an Apple Pay card label to an account |
+
+The initial accounts are **BBVA**, **Revolut**, **Company Welfare**, and **Edenred**. Add more with `/addaccount`. If a Telegram expense has no account, Till asks you to pick one. Existing expenses without an account appear under **Unassigned**; use `/account <id> <name>` to assign them.
 
 ## iPhone: automatic logging of Apple Pay payments
 
@@ -97,12 +104,12 @@ Requires iOS 17+. In the **Shortcuts** app:
      | `amount` | Text | Shortcut Input → **Amount** |
      | `merchant` | Text | Shortcut Input → **Merchant** |
      | `card` | Text | Shortcut Input → **Card or Pass** |
-4. Done. Pay with Apple Pay → the expense is stored and you get a Telegram message to pick a category (only the first time for each merchant).
+4. Done. Pay with Apple Pay → the expense is stored. If its card label has not been mapped, Till asks you to choose an account in Telegram and remembers that card-to-account mapping for next time. Uncategorized merchants also get the category picker.
 
 > The Wallet trigger only fires for Apple Pay/Wallet payments. Anything else → Telegram.
 
 The amount can be any format the Wallet produces (`€12,40`, `12,40 €`, `$1,234.56`). Other optional JSON fields:
-`currency` (ISO code), `category`, `name` (description), `date` (ISO 8601, defaults to now).
+`currency` (ISO code), `category`, `account` (account name), `name` (description), `date` (ISO 8601, defaults to now). Normally leave `account` out and use the card mapping so each card is assigned once.
 
 **Bonus — manual shortcut / Siri:** create a regular shortcut with *Ask for Input (Number)* → *Ask for Input (Text)* → the same *Get Contents of URL* using `amount` and `name`. Add it to the Home Screen or call it with "Hey Siri, log expense".
 
@@ -127,4 +134,9 @@ uv run pywrangler dev                               # http://localhost:8787
 
 `.dev.vars` is a plain-text file for local development, not an encrypted vault. Keep it out of synced/shared folders if possible, use local/test credentials, and never commit it.
 
-Schema changes: `npx wrangler d1 migrations create till <name>`, then apply `--local` / `--remote`.
+Schema changes: `npx wrangler d1 migrations create till <name>`, then apply `--local` / `--remote`. For an existing deployment, apply the new migration before deploying code that depends on it:
+
+```powershell
+npx wrangler d1 migrations apply till --remote
+uv run pywrangler deploy
+```
