@@ -1,5 +1,6 @@
 """Data access. All SQL lives here and runs unchanged on D1 and on sqlite3 (tests)."""
 
+import json
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -43,6 +44,19 @@ _COLUMNS = "id, amount_cents, currency, description, merchant, category, account
 class Repository:
     def __init__(self, db: Database):
         self.db = db
+
+    async def import_pdf(self, items: list[dict[str, Any]]) -> list[Expense]:
+        for item in items:
+            item["category"] = await self.category_for(item["merchant"]) or "uncategorized"
+        rows = await self.db.all(
+            "INSERT INTO expenses (amount_cents, currency, merchant, category, account, source, spent_at)"
+            " SELECT json_extract(value, '$.amount_cents'), json_extract(value, '$.currency'),"
+            " json_extract(value, '$.merchant'), json_extract(value, '$.category'),"
+            " json_extract(value, '$.account'), 'telegram', json_extract(value, '$.spent_at')"
+            f" FROM json_each(?) RETURNING {_COLUMNS}",
+            (json.dumps(items),),
+        )
+        return [Expense.from_row(row) for row in rows]
 
     async def add_expense(
         self,

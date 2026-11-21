@@ -2,9 +2,10 @@
 
 Personal expense tracker running entirely on Cloudflare — a **Python Worker** with a **D1** (SQLite) database.
 
-Two ways to log expenses:
+Three ways to log expenses:
 
 - **Telegram bot** — for anything not paid by Apple Pay (cash, bank transfers, online…): just send `12.50 lunch #food`.
+- **PDF import** — send a statement or invoice as a Telegram document; Workers AI extracts expenses.
 - **iPhone Shortcuts automation** — every Apple Pay payment is logged automatically through the Wallet *Transaction* trigger.
 
 Uncategorized expenses get an inline keyboard in Telegram; tapping a category also *teaches* Till that merchant/description, so the next payment at the same place is categorized automatically.
@@ -92,6 +93,16 @@ Optional settings (`vars` in `wrangler.jsonc`, or secrets):
 | `/transfers [n]` | Show recent transfers |
 
 The initial accounts are **BBVA**, **Revolut**, **Company Welfare**, and **Edenred**. Add more with `/addaccount`. If a Telegram expense has no account, Till asks you to pick one. Existing expenses without an account appear under **Unassigned**; use `/account <id> <name>` to assign them.
+
+### PDF import
+
+Send a PDF as a document to the bot. To assign its expenses to an existing account, use the account name as the document caption (for example `BBVA`); without a caption, expenses are unassigned. An unknown caption rejects the import. The bot imports automatically and replies with each imported expense's ID, date, merchant, and amount. Use `/del <id>` or `/account <id> <name>` to correct entries.
+
+Till extracts text per page and sends it to Workers AI. For a page without sufficient text it attempts vision on a single embedded scan image of at most 2 MB; PDFs requiring full page rendering, multiple image tiles, or password decryption are not supported. PDFs are limited to 10 MB and 20 pages. The whole import fails if a page cannot be processed; malformed or incomplete AI transaction rows, income, and transfers are skipped. The skip count cannot include transactions the AI failed to detect. AI can make mistakes: check the resulting list against the document, especially dates, amounts, refunds, and invoice totals.
+
+Imports are **not** deduplicated: resending a PDF, Telegram retries, overlapping statements, or an invoice and a bank statement can create duplicate expenses. The original PDF is not stored, but its contents are sent to Cloudflare Workers AI, with one AI request per page; normal Workers AI usage limits and charges apply.
+
+The scanned-image fallback uses Cloudflare's Llama 3.2 Vision model, which requires accepting Meta's license and acceptable use policy with an initial request before first use. Follow the [model setup instructions](https://developers.cloudflare.com/workers-ai/models/llama-3.2-11b-vision-instruct/). AI bindings can use remote resources and incur charges even during local development.
 
 For balances, add any accounts you use (for example `/addaccount Cash`) and enter each account's real starting balance with `/openingbalance "Account name" amount [currency]`. This is a baseline as of the moment you run the command: older expenses already in Till are not subtracted again. Set one opening balance for each currency you want tracked. Then record incoming money with `/income`, expenses as usual, and movements between your own accounts with `/transfer`. A cash withdrawal is a transfer (for example BBVA → Cash), not an expense; log the cash purchases separately. `/balance` applies expenses and refunds after each account/currency's opening balance and includes income and transfers. Currencies are calculated independently; the balance may go below zero if the opening balance or a transaction is missing.
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from .config import Config
 from .money import AmountError, as_currency_code, format_money, parse_amount
+from .pdf_import import PdfImportError, PdfImporter
 from .repository import Expense, Repository
 from .timeutil import from_db, get_zone, period_bounds, to_db
 
@@ -21,6 +22,7 @@ HELP = """<b>Till</b> — expense tracker
 <code>12.50 lunch #food @revolut</code>
 <code>8,90 taxi</code>  ·  <code>€30 gift #shopping</code>  ·  <code>20 USD souvenir</code>
 Use <code>-</code> for refunds: <code>-15 refund #shopping</code>
+Send a PDF statement to import expenses; optionally use an account name as its caption.
 
 <b>Reports</b>
 /today · /week · /month · /year — totals by account and category
@@ -135,11 +137,12 @@ async def expense_logged_calls(
 
 
 class Bot:
-    def __init__(self, repo: Repository, config: Config, now: datetime | None = None):
+    def __init__(self, repo: Repository, config: Config, now: datetime | None = None, pdf_importer: PdfImporter | None = None):
         self.repo = repo
         self.config = config
         self.zone = get_zone(config.timezone)
         self._now = now
+        self.pdf_importer = pdf_importer
 
     @property
     def now(self) -> datetime:
@@ -149,13 +152,34 @@ class Bot:
         if cb := update.get("callback_query"):
             return await self._handle_callback(cb)
         message = update.get("message")
-        if not message or "text" not in message:
+        if not message:
             return []
         chat_id = message["chat"]["id"]
-        text = message["text"].strip()
+        text = message.get("text", "").strip()
         if chat_id not in self.config.allowed_chat_ids:
             if text.startswith("/start"):
                 return [_message(chat_id, f"Not authorized. Add chat id <code>{chat_id}</code> to ALLOWED_CHAT_IDS.")]
+            return []
+        if document := message.get("document"):
+            if not self.pdf_importer:
+                return [_message(chat_id, "PDF importing is unavailable.")]
+            try:
+                result = await self.pdf_importer.import_document(document, message.get("caption", ""))
+            except PdfImportError as exc:
+                return [_message(chat_id, f"PDF import failed: {html.escape(str(exc))}")]
+            lines = [
+                f"#{e.id} · {from_db(e.spent_at, self.zone):%Y-%m-%d} · {html.escape(e.merchant or 'Unknown')} · "
+                f"{html.escape(format_money(e.amount_cents, e.currency))}"
+                for e in result.expenses
+            ]
+            header = f"Imported {len(result.expenses)} transactions. Skipped: {result.skipped}."
+            messages = [header]
+            for line in lines:
+                if len((messages[-1] + "\n" + line).encode("utf-16-le")) // 2 > 4000:
+                    messages.append("")
+                messages[-1] += "\n" + line
+            return [_message(chat_id, body) for body in messages]
+        if not text:
             return []
         if text.startswith("/"):
             return await self._handle_command(chat_id, text)

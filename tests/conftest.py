@@ -22,7 +22,10 @@ class SqliteDatabase:
             self.conn.executescript(f.read_text(encoding="utf-8"))
 
     async def all(self, sql, params=()):
-        return [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        rows = [dict(r) for r in self.conn.execute(sql, params).fetchall()]
+        if sql.lstrip().upper().startswith("INSERT"):
+            self.conn.commit()
+        return rows
 
     async def run(self, sql, params=()):
         cur = self.conn.execute(sql, params)

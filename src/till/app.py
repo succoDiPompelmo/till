@@ -11,6 +11,7 @@ from typing import Any
 from .bot import Bot, Call, expense_logged_calls
 from .config import Config
 from .money import AmountError, parse_amount
+from .pdf_import import PdfImporter
 from .repository import Repository
 from .timeutil import from_db, get_zone, parse_iso, period_bounds, to_db
 
@@ -40,11 +41,12 @@ def _clean(value: Any, limit: int = 200) -> str | None:
 
 
 class App:
-    def __init__(self, repo: Repository, config: Config, now: datetime | None = None):
+    def __init__(self, repo: Repository, config: Config, now: datetime | None = None, pdf_importer: PdfImporter | None = None):
         self.repo = repo
         self.config = config
         self.zone = get_zone(config.timezone)
         self._now = now
+        self.pdf_importer = pdf_importer
 
     @property
     def now(self) -> datetime:
@@ -77,7 +79,7 @@ class App:
             update = json.loads(body)
         except json.JSONDecodeError:
             return HttpResult(400, {"error": "invalid json"})
-        calls = await Bot(self.repo, self.config, self._now).handle_update(update)
+        calls = await Bot(self.repo, self.config, self._now, self.pdf_importer).handle_update(update)
         # Always 200 so Telegram doesn't keep retrying an update.
         return HttpResult(200, {"ok": True}, telegram_calls=calls)
 
